@@ -1,0 +1,52 @@
+# python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+sdist/
+
+# virtual environments
+.venv/
+envs/
+
+# data files
+*.hdf5
+*.npy
+*.npz
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.in
+*.ovr
+
+# editors
+.vscode/
+.idea/
+
+# locally-hosted docs
+_build/
+_generated/
+
+# os
+.DS_Store
+Thumbs.db
+
+# jupyter
+.ipynb_checkpoints/
+
+# testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# type checking
+.mypy_cache/
+.pyright/
+
+# ruff
+.ruff_cache/
