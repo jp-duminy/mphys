@@ -23,6 +23,7 @@ envs/
 *.jpeg
 *.in
 *.ovr
+*.pkl
 
 # editors
 .vscode/
