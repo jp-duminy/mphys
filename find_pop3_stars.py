@@ -131,47 +131,48 @@ field_map = {
 }
 
 if __name__ == "__main__":
-    build_pop3_ledger(
-        field_map=field_map,
-        reduced_snap_dir=DATA_DIR / "pop3",
-        save_path=Path("pop3_catalogue.parquet"),
-    )
 
-"""
-# probe Pop3 stars
-test_snap = DATA_DIR / "DD0157" / "DD0157"
+    parquet_path = Path("pop3_catalogue.parquet")
 
-yt.set_log_level("info")
+    with timer("Build ledger"):
+        build_pop3_ledger(
+            field_map=field_map,
+            reduced_snap_dir=DATA_DIR / "pop3",
+            save_path=parquet_path,
+        )
+    yt.set_log_level("info")
+    
+    # probe Pop3 stars
+    test_snap = DATA_DIR / "DD0157" / "DD0157"
 
-with open("pop3_catalogues.pkl", "rb") as f:
-    catalogues = pickle.load(f)
+    ledger = pl.read_parquet(parquet_path)
+    print(f"Total Pop3 Stars: {ledger["particle_indices"].n_unique()}")
+    snapshot_cols = ledger.filter(pl.col("snapshot") == "DD0157")
+    # grab the earliest-formed Pop3 star
+    star1_row = snapshot_cols.sort("creation_times_myr").row(0, named=True)  # return as dict
 
-cat: StarCatalogue = catalogues[test_snap.stem]
+    with timer("Load snapshot"):
+        ds = yt.load(test_snap)
+        ds.add_particle_filter("pop3")
 
-print(f"Number of Pop3 Stars: {len(cat.particle_indices)}")
+    star_centre = ds.arr(star1_row["positions_unitary"], "unitary")
+    radius = (1.0, "kpc")
+    print(f"{ds.domain_center.to("unitary")}")
 
-with timer("Load snapshot"):
-    ds = yt.load(test_snap)
-    ds.add_particle_filter("pop3")
+    with timer("Build sphere"):
+        sp = ds.sphere(star_centre, radius)
 
-star1_pos = cat.positions[0]  # test on whichever pop3 star appears first
-radius = (1.0, "kpc")
-print(f"{ds.domain_center.to("unitary")}")
+    with timer("Projection plot"):
+        p = yt.ProjectionPlot(
+            ds,
+            "x",
+            ("gas", "temperature"),
+            center=sp.center,
+            data_source=sp,
+            width=(2.0, "kpc"),
+            weight_field=("gas", "density"),
+        )
+        p.annotate_particles((1.0, "kpc"), p_size=3.0, ptype="pop3")  # should pick up the star
 
-with timer("Build sphere"):
-    sp = ds.sphere(star1_pos, radius)
+        p.save("cursory_plot.png")
 
-with timer("Projection plot"):
-    p = yt.ProjectionPlot(
-        ds,
-        "x",
-        ("gas", "temperature"),
-        center=sp.center,
-        data_source=sp,
-        width=(2.0, "kpc"),
-        weight_field="temperature",
-    )
-    p.annotate_particles((1.0, "kpc"), p_size=3.0, ptype="pop3")  # should pick up the star
-
-    p.save("cursory_plot.png")
-"""
