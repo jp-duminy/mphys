@@ -4,22 +4,24 @@ Functions for analysing the properties of Pop3 stars in reduced Pop2Prime simula
 
 """
 
+from typing import TYPE_CHECKING, Generator
+
+if TYPE_CHECKING:
+    from yt.data_objects.particle_filters import ParticleFilter
+    from yt.data_objects.data_containers import YTDataContainer
+
 import pickle
 from pathlib import Path
 from dataclasses import dataclass
+from contextlib import contextmanager
+from time import perf_counter
 
 import yt
+from yt.data_objects.particle_filters import add_particle_filter
 import numpy as np
 
 # top-level data directory
 DATA_DIR = Path("/cephfs2/brs/pop2-prime/cc_512_no_dust_continue")
-
-# exploratory dataset at z = 17.7
-ds = yt.load(DATA_DIR / "pop3" / "DD0157.h5")
-print(ds.field_list)
-print(ds.data[("pop3", "metallicity_fraction")])
-print(ds.data[("pop3", "particle_position_x")])
-print(ds.data[("pop3", "creation_time")].to("Gyr"))  # this and above show our two stars in the snapshot
 
 @dataclass(slots=True)
 class StarCatalogue:
@@ -93,7 +95,66 @@ def build_pop3_star_catalogues(reduced_snap_dir: Path, metal_free_threshold: flo
 
     return catalogues
 
-catalogues = build_pop3_star_catalogues(reduced_snap_dir=DATA_DIR / "pop3")
-        
-with open("pop3_catalogues.pkl", "wb") as f:  # needs wb for write-binary
-    pickle.dump(catalogues, f)
+def _pop3(pfilter: ParticleFilter, data: YTDataContainer):
+    """
+    Filters particles to the conditions expected for Pop3 particles.
+    """
+    # stars (ptype 5): filter to supernova remnants and living stars
+    pop3_remnant = (data["particle_type"] == 5) & (data["particle_mass"].in_units("Msun") < 1e-10)
+    pop3_star = (data["particle_type"] == 5) & (data["particle_mass"].in_units("Msun") > 1e-3)
+
+    # dm (ptype 1): REVIEW: unsure why dm is entering the equation here
+    pop3_dm = (data["particle_type"] == 1) & (data["creation_time"] > 0) & (data["particle_mass"].in_units("Msun") > 1)
+
+    return pop3_remnant | pop3_dm | pop3_star
+
+add_particle_filter("pop3", function=_pop3, filtered_type="all",
+                    requires=["particle_type", "creation_time", "particle_mass"])
+
+@contextmanager
+def timer(label: str) -> Generator[None, None, None]:
+    """
+    Context manager around perf_counter().
+    """
+    t0 = perf_counter()
+    yield
+    elapsed = perf_counter() - t0
+    print(f"{label} completed in {elapsed:.1f}s.")
+
+# probe Pop3 stars
+test_snap = DATA_DIR / "DD0157" / "DD0157"
+
+yt.set_log_level("info")
+
+with open("pop3_catalogues.pkl", "rb") as f:
+    catalogues = pickle.load(f)
+
+cat: StarCatalogue = catalogues[test_snap.stem]
+
+print(f"Number of Pop3 Stars: {len(cat.particle_indices)}")
+
+with timer("Load snapshot"):
+    ds = yt.load(test_snap)
+    ds.add_particle_filter("pop3")
+
+star1_pos = cat.positions[0]  # test on whichever pop3 star appears first
+radius = (1.0, "kpc")
+print(f"{ds.domain_center.to("unitary")}")
+
+with timer("Build sphere"):
+    sp = ds.sphere(star1_pos, radius)
+
+with timer("Projection plot"):
+    p = yt.ProjectionPlot(
+        ds,
+        "x",
+        ("gas", "temperature"),
+        center=sp.center,
+        data_source=sp,
+        width=(2.0, "kpc"),
+        weight_field="temperature",
+    )
+    p.annotate_particles((1.0, "kpc"), p_size=3.0, ptype="pop3")  # should pick up the star
+
+    p.save("cursory_plot.png")
+
