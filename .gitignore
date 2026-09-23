@@ -24,6 +24,7 @@ envs/
 *.in
 *.ovr
 *.pkl
+*.parquet
 
 # editors
 .vscode/
