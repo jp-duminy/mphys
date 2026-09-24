@@ -23,11 +23,11 @@ from joblib import Parallel, delayed
 # top-level data directory
 DATA_DIR = Path("/cephfs2/brs/pop2-prime/cc_512_no_dust_continue")
 
-
 def build_pop3_ledger(
     field_map: dict[str, tuple[str, str]],
     reduced_snap_dir: Path,
     pop3_threshold: float = 1e-10,
+    min_sep_myr: float = 1e-3,
     save_path: Path | None = None,
 ) -> pl.DataFrame:
     """
@@ -43,13 +43,71 @@ def build_pop3_ledger(
 
     frame_list = [frame for frame in frame_list if frame is not None]  # filter None (from empty snaps)
     ledger: pl.DataFrame = pl.concat(frame_list)  # vertical concat
+    ledger = ledger.pipe(filter_duplicates, min_sep_myr=min_sep_myr).with_columns(age_myr(), is_alive(), star_label())
+
+    print(f"Total Pop3 Stars: {ledger.n_unique("particle_indices")}")
+
+    with pl.Config(tbl_rows=-1):
+        df_diagnostic = (
+        ledger.sort("particle_indices")
+        .unique("particle_indices", keep="first", maintain_order=True)
+        .select("label", "particle_indices", "creation_times_myr", "metallicities")
+        )
+        print(df_diagnostic)
 
     if save_path:
         ledger.write_parquet(save_path)
         print(f"Wrote parquet file at {save_path}")
 
-    return ledger        
+    return ledger       
 
+def age_myr() -> pl.Expr:
+    """
+    Calculates star age in Myr from current_time - creation_time.
+    """
+    return (pl.col("current_time_myr") - pl.col("creation_times_myr")).alias("age_myr")
+
+def star_label() -> pl.Expr:
+    """
+    Names the star based on its formation time.
+    """
+    return (pl.format("POP3-{}", pl.col("creation_times_myr").floor().cast(pl.Int64))).alias("label")
+
+def is_alive() -> pl.Expr:
+    """
+    Determines whether or not a star is alive.
+    """
+    return (pl.col("ptypes") != 1).alias("is_alive")
+
+def alive_snapshots(ledger: pl.DataFrame) -> pl.DataFrame:
+    """
+    Finds the snapshots wherein each star is alive.
+    """
+    return (
+        ledger.filter(is_alive())
+        .group_by("particle_indices")
+        .agg(pl.col("snapshot").sort_by("current_time_myr"))
+    )
+
+def filter_duplicates(ledger: pl.DataFrame, min_sep_myr: float = 1e-3) -> pl.DataFrame:
+    """
+    In the simulation, stars with negligible mass can spawn in straight after a Pop3 stars (let's call them
+    invasive stars); this filters them on a min_sep_myr threshold on their ages.
+    """
+    # get a reduced dataframe of invasive stars (those which come within min_sep_myr of a Pop3)
+    invasive_stars =  (
+        ledger.select("particle_indices", "creation_times_myr").unique(subset="particle_indices")
+        .sort("creation_times_myr", "particle_indices")  # use index as a tiebreak in case stars have ~= formation time
+        .filter(pl.col("creation_times_myr").diff() < min_sep_myr)
+    )
+
+    return ledger.join(invasive_stars, on="particle_indices", how="anti")  # drop those stars from the ledger
+
+def select_star(ledger: pl.DataFrame, particle_indices: list[int]) -> pl.DataFrame:
+    """
+    Grab the properties of specified stars from the ledger.
+    """
+    return (ledger.filter(pl.col("particle_indices").is_in(particle_indices)))
 
 def create_snapshot_dataframe(
     snapshot: Path, 
@@ -103,7 +161,7 @@ def _pop3(pfilter: ParticleFilter, data: YTDataContainer):
     pop3_remnant = (data["particle_type"] == 5) & (data["particle_mass"].in_units("Msun") < 1e-10)
     pop3_star = (data["particle_type"] == 5) & (data["particle_mass"].in_units("Msun") > 1e-3)
 
-    # dm (ptype 1): REVIEW: unsure why dm is entering the equation here
+    # dm (ptype 1): HACK: enzo stores dead stars as dm particles with nonzero creation time
     pop3_dm = (data["particle_type"] == 1) & (data["creation_time"] > 0) & (data["particle_mass"].in_units("Msun") > 1)
 
     return pop3_remnant | pop3_dm | pop3_star
@@ -145,8 +203,10 @@ if __name__ == "__main__":
     # probe Pop3 stars
     test_snap = DATA_DIR / "DD0157" / "DD0157"
 
-    ledger = pl.read_parquet(parquet_path)
-    print(f"Total Pop3 Stars: {ledger["particle_indices"].n_unique()}")
+    ledger = pl.read_parquet(parquet_path) 
+    print("success.")
+
+    """
     snapshot_cols = ledger.filter(pl.col("snapshot") == "DD0157")
     # grab the earliest-formed Pop3 star
     star1_row = snapshot_cols.sort("creation_times_myr").row(0, named=True)  # return as dict
@@ -175,4 +235,4 @@ if __name__ == "__main__":
         p.annotate_particles((1.0, "kpc"), p_size=3.0, ptype="pop3")  # should pick up the star
 
         p.save("cursory_plot.png")
-
+    """
