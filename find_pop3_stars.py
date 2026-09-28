@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from yt.data_objects.particle_filters import ParticleFilter
     from yt.data_objects.data_containers import YTDataContainer
+    from yt.data_objects.static_output import Dataset
 
 from pathlib import Path
 
@@ -109,6 +110,34 @@ def select_star(ledger: pl.DataFrame, particle_indices: list[int]) -> pl.DataFra
     """
     return (ledger.filter(pl.col("particle_indices").is_in(particle_indices)))
 
+
+def build_film_tasks(ledger: pl.DataFrame, particle_indices: list[int], snapshot_dir: Path) -> pl.DataFrame:
+    """
+    Creates a dataframe containing the following info for making a film:
+
+    - particle_indices: particle IDs
+    - label: the label of each star for titles
+    - snapshot_path: the paths to each raw snapshot
+    - centre_unitary: the positions of the stars in the raw snapshot
+    - base_name: the {label}_{snapshot_stem} str.
+    """
+    tasks = (
+        ledger.pipe(select_star, particle_indices)
+        .sort("particle_indices", "snapshot")
+        .with_columns(
+            pl.col("positions_unitary").first().over("particle_indices").alias("centre_unitary"),  # position of star in its first snap
+            pl.format("{}/{}/{}", pl.lit(str(snapshot_dir)), pl.col("snapshot"), pl.col("snapshot"))  # concatenate directories
+                .alias("snapshot_path"),
+            pl.format("{}_{}", pl.col("label"), pl.col("snapshot")).alias("base_name"),  # concatenate star name + snap name
+        )
+        .select("particle_indices", "label", "snapshot_path", "centre_unitary", "base_name")
+    )
+
+    if not all(Path(path).exists() for path in tasks["snapshot_path"]):
+        print("Warning: not all snapshot paths exist (should not happen by construction).")
+
+    return tasks
+
 def create_snapshot_dataframe(
     snapshot: Path, 
     pop3_threshold: float, 
@@ -177,6 +206,23 @@ field_map = {
     "metallicities": ("metallicity_fraction", "dimensionless"),
     "creation_times_myr": ("creation_time", "Myr"),
 }
+
+def _add_metallicity3(ds: Dataset) -> None:
+    """
+    Adds the metallicity3 field to a yt dataset.
+    """
+    if ("gas", "metallicity3") in ds.derived_field_list:
+        return
+
+    ds.unit_registry.modify("Zsun", ds.parameters["SolarMetalFractionByMass"])
+
+    ds.add_field(
+        ("gas", "metallicity3"), 
+        function=lambda field, data: data["enzo", "SN_Colour"] / data["gas", "density"],
+        units="Zsun",
+        sampling_type="cell",
+    )
+    
 
 if __name__ == "__main__":
 
