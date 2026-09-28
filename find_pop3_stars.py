@@ -4,21 +4,21 @@ Functions for analysing the properties of Pop3 stars in reduced Pop2Prime simula
 
 """
 
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from yt.data_objects.particle_filters import ParticleFilter
     from yt.data_objects.data_containers import YTDataContainer
 
 from pathlib import Path
-from contextlib import contextmanager
-from time import perf_counter
 
 import yt
 from yt.data_objects.particle_filters import add_particle_filter
 import numpy as np
 import polars as pl
 from joblib import Parallel, delayed
+
+from utils import timer
 
 # top-level data directory
 DATA_DIR = Path("/cephfs2/brs/pop2-prime/cc_512_no_dust_continue")
@@ -168,16 +168,6 @@ def _pop3(pfilter: ParticleFilter, data: YTDataContainer):
 
 add_particle_filter("pop3", function=_pop3, filtered_type="all",
                     requires=["particle_type", "creation_time", "particle_mass"])
-
-@contextmanager
-def timer(label: str) -> Generator[None, None, None]:
-    """
-    Context manager around perf_counter().
-    """
-    t0 = perf_counter()
-    yield
-    elapsed = perf_counter() - t0
-    print(f"{label} completed in {elapsed:.1f}s.")
 
 field_map = {
     "positions_unitary": ("particle_position", "unitary"),
