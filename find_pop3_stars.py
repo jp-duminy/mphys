@@ -19,10 +19,8 @@ import numpy as np
 import polars as pl
 from joblib import Parallel, delayed
 
-from utils import timer
+from utils import timer, DATA_DIR
 
-# top-level data directory
-DATA_DIR = Path("/cephfs2/brs/pop2-prime/cc_512_no_dust_continue")
 
 def build_pop3_ledger(
     field_map: dict[str, tuple[str, str]],
@@ -207,7 +205,7 @@ field_map = {
     "creation_times_myr": ("creation_time", "Myr"),
 }
 
-def _add_metallicity3(ds: Dataset) -> None:
+def add_metallicity3(ds: Dataset) -> None:
     """
     Adds the metallicity3 field to a yt dataset.
     """
