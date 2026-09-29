@@ -4,24 +4,26 @@ Routine for generating films for a specified star.
 
 """
 
+
 import argparse
-from pathlib import Path
 import gc
+from pathlib import Path
 
 import polars as pl
 import yt
 from yt.funcs import ensure_dir
-yt.enable_parallelism()
 
 from find_pop3_stars import build_film_tasks, add_metallicity3
 from utils import timer, DATA_DIR
+
+yt.enable_parallelism()
 
 def parse_args() -> argparse.Namespace:
     """
     Parses the command-line arguments; returns the corresponding Namespace object.
     """
     parser = argparse.ArgumentParser(
-        prog="mphys",
+        prog="star-plot",
         description="Routine for making a plot of stars' lifetimes across the Pop2Prime simulation.",
         suggest_on_error=True,
     )
@@ -54,16 +56,19 @@ def parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
-def main() -> None:
+def generate_star_images(
+    outdir: Path,
+    ledger_path: Path,
+    width_kpc: float = 1.0,
+    axis: str = "x",
+    quickpeek: bool = False,
+) -> None:
     """
-    Executes the plotting routine.
+    Generates projection plots of the star in each snapshot and saves them as .h5 files to the 
+    requested output directory.
     """
-    args = parse_args()
-    output_dir: Path = args.outdir
-    ensure_dir(output_dir)
-    ledger = pl.read_parquet(Path("pop3_catalogue.parquet"))
-    
-    tasks = build_film_tasks(ledger=ledger, particle_indices=[334267081], snapshot_dir=DATA_DIR)
+    ledger = pl.read_parquet(ledger_path)
+    tasks = build_film_tasks(ledger=ledger, particle_indices=[334267081], snapshot_dir=DATA_DIR)  # TODO: support multiple stars
 
     fields = [
         ("gas", "density"),
@@ -76,7 +81,7 @@ def main() -> None:
 
         yt.mylog.info(f"Processing {row['snapshot_path']}")
 
-        outpath = output_dir / f"{row['base_name']}_{args.axis}.h5"
+        outpath = outdir / f"{row['base_name']}_{axis}.h5"
 
         if outpath.exists():
             yt.mylog.info(f"{outpath} already exists.")
@@ -86,20 +91,20 @@ def main() -> None:
         add_metallicity3(ds=ds)
 
         centre = ds.arr(row["centre_unitary"], "unitary")
-        width = ds.quan(args.width, "kpc")
+        width = ds.quan(width_kpc, "kpc")
 
         region = ds.box(centre - 1.05 * width / 2,
                 centre + 1.05 * width / 2)
 
         with timer("Generate Plot:"):
             p = yt.ProjectionPlot(
-                ds, args.axis, fields, weight_field=weight_field,
+                ds, axis, fields, weight_field=weight_field,
                 center=centre, width=width, data_source=region)
             data = {field[1]: p.frb[field] for field in fields}
 
-        if args.quickpeek:
+        if quickpeek:
             if yt.is_root():
-                p.save(f"{output_dir / 'projection_images'}/")
+                p.save(f"{outdir / 'projection_images'}/")
         del p
 
         if yt.is_root():
@@ -112,7 +117,14 @@ def main() -> None:
         val = gc.collect()
         yt.mylog.info(f"Removed {val:,.2f} objects.")
 
-
 if __name__ == "__main__":
 
-    main()
+    args = parse_args()
+    ensure_dir(args.outdir)
+    generate_star_images(
+        outdir=args.outdir,
+        ledger_path=Path("pop3_catalogue.parquet"),
+        width_kpc=args.width,
+        axis=args.axis,
+        quickpeek=args.quickpeek,
+    )
