@@ -4,26 +4,31 @@ Stitches together projection plots into a film for stars.
 
 """
 
+from typing import Any
+from pathlib import Path
+import subprocess
+import argparse
+
+import yt
+import numpy as np
+import polars as pl
+from scipy.special import expit
+from joblib import Parallel, delayed, effective_n_jobs
+from rich.progress import track
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+import yt.visualization.color_maps  # noqa: F401
 # NOTE: these can't be under TYPE_CHECKING guard otherwise joblib crashes (the traceback is esoteric)
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.text import Text
 
-from pathlib import Path
-import subprocess
-
-import yt
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib .colors import LogNorm
-from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from scipy.special import expit
-from joblib import Parallel, delayed, effective_n_jobs
-from yt.visualization.color_maps import *
-
 from utils import timer
+from pop3_ledger import star_lifetime_summary, select_stars
 
 MPL_STYLE = Path.home() / "mnras.mplstyle"
 
@@ -32,6 +37,107 @@ FIELD_STYLES: dict[str, tuple[str, str]] = {
     "temperature": ("gist_heat", "T [K]"),
     "metallicity3": ("kamae", r"Z [Z$_{\odot}$]"),
 }
+
+METALLICITY_FLOOR = 1e-8
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parses the command-line arguments; returns the corresponding Namespace object.
+    """
+    parser = argparse.ArgumentParser(
+        prog="star-film",
+        description="Routine for converting star projection plots into film.",
+        suggest_on_error=True,
+    )
+    parser.add_argument(
+        "-p",
+        "--projdir",
+        type=Path,
+        required=True,
+        help="Path to projection plots."
+    )
+    parser.add_argument(
+        "-l",
+        "--ledger",
+        type=Path,
+        default=Path("pop3_ledger.parquet"),
+        help="Path to pop3 ledger."
+    )
+    parser.add_argument(
+        "-o", 
+        "--outdir",
+        type=Path,
+        default=Path("."),
+        help="Path to output directory."
+    )
+    parser.add_argument(
+        "-a",
+        "--axis",
+        type=str,
+        default="x",
+        help="Axis used for projections."
+    )
+    parser.add_argument(
+        "-f",
+        "--framerate",
+        type=int,
+        default=60,
+        help="Framerate for the films."
+    )
+    parser.add_argument(
+        "-s",
+        "--stars",
+        nargs="+",  # allows a list to be passed
+        help="Labels of stars for which you would like to produce plots."
+    )
+
+    return parser.parse_args()
+
+
+def make_star_film(
+    star: dict[str, Any],  # comes from dataframe iters
+    projections_root: Path,
+    plots_root: Path,
+    axis: str,
+    framerate: int,
+) -> None:
+    label: str = star["label"]
+
+    paths, snapshot_times_myr, field_ranges, width_kpc = collect_projections(
+        image_dir=projections_root / label, label=label, axis=axis,
+    )
+    field_ranges["metallicity3"] = (METALLICITY_FLOOR, field_ranges["metallicity3"][1])
+
+    transition_time_myr = star["first_dead_myr"]
+
+    frame_times_myr = build_frame_times(
+        snapshot_times_myr=snapshot_times_myr,
+        transition_time=transition_time_myr,
+        cutoff_myr=snapshot_times_myr[-1],
+        dt_min=0.01,  # NOTE: slightly increased from Britton's (0.15 is a bit patchy)
+        dt_max=0.25, 
+        transition_rate=1.0,  # increased to make faster
+    )
+
+    frame_dir = plots_root / "frames" / label
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    [f.unlink() for f in frame_dir.glob("*") if f.is_file()]
+
+    render_frames(
+        projection_paths=paths,
+        snapshot_times_myr=snapshot_times_myr,
+        frame_times_myr=frame_times_myr,
+        field_ranges=field_ranges,
+        creation_time_myr=star["creation_times_myr"],
+        width_kpc=width_kpc,
+        frame_dir=frame_dir,
+    )
+
+    assemble_film(
+        frame_dir=frame_dir,
+        output_path=plots_root / f"{label}_{axis}.mp4",
+        framerate=framerate,
+    )
 
 def build_frame_times(
     snapshot_times_myr: np.ndarray,
@@ -55,29 +161,36 @@ def build_frame_times(
     return np.array(frame_times_myr)
 
 
-def collect_projections(image_dir: Path, label: str, axis: str) -> tuple[list[Path], np.ndarray, dict[str, tuple[float, float]]]:
+def collect_projections(image_dir: Path, label: str, axis: str) -> tuple[list[Path], np.ndarray, dict[str, tuple[float, float]], float]:
     """
     Collects the projection plots from an image directory. Returns:
 
     - files: a list of projection paths
     - times_myr: their corresponding times in Myr
+    - field_ranges: dict keyed by field with min/max of that field across plots
+    - width_kpc: the kpc width of the frame
     """
     field_names = ("density", "temperature", "metallicity3")
     projection_paths = sorted(image_dir.glob(f"{label}_*_{axis}.h5"))
     assert projection_paths, f"No projections found in {image_dir}"
 
-    scan_results = Parallel(n_jobs=-1)(delayed(_scan_projection)(path, field_names) for path in projection_paths)
+    scan_results = Parallel(n_jobs=-1, return_as="generator")(delayed(_scan_projection)(path, field_names) for path in projection_paths)
 
-    snapshot_times_myr = np.array([result[0] for result in scan_results])
+    results = list(track(scan_results, total=len(projection_paths), description="Collecting projections"))
+
+    snapshot_times_myr = np.array([result[0] for result in results])
     field_ranges = {  # logic from previous function put into this (somewhat ugly) form
         field_name: (
-            min(result[1][field_name] for result in scan_results),  # reduce over joblib list now
-            max(result[2][field_name] for result in scan_results),
+            min(result[1][field_name] for result in results),  # reduce over joblib list now
+            max(result[2][field_name] for result in results),
         )
         for field_name in field_names
     }
 
-    return projection_paths, snapshot_times_myr, field_ranges
+    quick_ds = yt.load(projection_paths[0])
+    width_kpc = float(quick_ds.parameters["width_kpc"])  # should always be the same
+
+    return projection_paths, snapshot_times_myr, field_ranges, width_kpc
 
 
 def _scan_projection(projection_path: Path, field_names: tuple[str]) -> tuple[float, dict[str, float], dict[str, float]]:
@@ -87,7 +200,7 @@ def _scan_projection(projection_path: Path, field_names: tuple[str]) -> tuple[fl
     - time_myr
     - field_mins: a dict for each field containing the min (NaN masked)
     """
-    yt.set_log_level("warning")  # prevent lots of verbose output
+    yt.set_log_level("error")  # prevent lots of verbose output
     projection_ds = yt.load(projection_path)
 
     time_myr = float(projection_ds.current_time.to("Myr"))
@@ -98,8 +211,6 @@ def _scan_projection(projection_path: Path, field_names: tuple[str]) -> tuple[fl
         field_values = projection_ds.data["data", field_name].d
         field_mins[field_name] = float(np.min(field_values, where=field_values > 0, initial=np.inf))
         field_maxs[field_name] = float(np.nanmax(field_values))
-
-    print(f"{projection_path.stem}: success.")
 
     return time_myr, field_mins, field_maxs
 
@@ -245,7 +356,7 @@ def render_frames(
     """
     Parallelises over all frames.
     """
-    assert frame_times_myr[0] >= creation_time_myr, "Creation time after first snapshot: check units."
+    assert frame_times_myr[0] >= creation_time_myr, "Creation time before first snapshot: check units."
 
     lower_indices = np.searchsorted(snapshot_times_myr, frame_times_myr, side="right") - 1  # finds where sigmoid time intersects snapshot time
     np.clip(lower_indices, a_min=0, a_max=len(snapshot_times_myr)-2, out=lower_indices)  # need -2 to avoid overshooting snapshot time
@@ -261,8 +372,6 @@ def render_frames(
         )
         for chunk in frame_chunks
     )
-
-    print("All frames generated.")
 
 
 def assemble_film(frame_dir: Path, output_path: Path, framerate: int) -> None:
@@ -283,53 +392,19 @@ def assemble_film(frame_dir: Path, output_path: Path, framerate: int) -> None:
 
 if __name__ == "__main__":
 
-    CUTOFF_TIME = 150
+    args = parse_args()
+    ledger: pl.DataFrame = pl.read_parquet(args.ledger)
+    summaries = star_lifetime_summary(ledger=ledger)
 
-    projection_paths = Path.home() / "mphys" / "data"
-    plot_paths = Path.home() / "mphys" / "plots"
+    projection_dir: Path = args.projdir
+    labels = args.stars or [path.name for path in projection_dir.iterdir() if path.is_dir()]
 
-    with timer("Collect projections"):
-        paths, snap_times_myr, field_ranges = collect_projections(
-            image_dir=projection_paths,  # TODO: more useful dir
-            label="POP3-144",
-            axis="x"
-        )
-
-    field_ranges["metallicity3"] = (1e-8, field_ranges["metallicity3"][1])  # floor metallicity to Britton's value
-
-    print(field_ranges)
-    print(snap_times_myr[[0, -1]])
-
-    cutoff_myr = min(snap_times_myr[-1], 144+CUTOFF_TIME)
-
-    with timer(f"Build frame times"):
-        frame_times_myr = build_frame_times(
-            snapshot_times_myr=snap_times_myr,
-            transition_time=148,
-            dt_min=0.01,  # NOTE: slightly increased from Britton's (0.15 is a bit patchy)
-            dt_max=0.25, 
-            transition_rate=1.0,
-            cutoff_myr=cutoff_myr,
-        )
-
-    print(len(frame_times_myr))
-
-    with timer("Render frames"):
-        # override the latex and some context settings for the plot
-        with plt.style.context([MPL_STYLE, {"text.usetex": False, "mathtext.fontset": "cm", "savefig.bbox": None}]):
-            render_frames(
-                projection_paths=paths,
-                snapshot_times_myr=snap_times_myr,
-                frame_times_myr=frame_times_myr,
-                field_ranges=field_ranges,
-                creation_time_myr=144.0,
-                width_kpc=1.0,
-                frame_dir=plot_paths / "frames",
+    for star in summaries.pipe(select_stars, labels).iter_rows(named=True):
+        with timer(f"Film {star['label']}"):
+            make_star_film(
+                star=star, 
+                projections_root=args.projdir, 
+                plots_root=args.outdir, 
+                axis=args.axis, 
+                framerate=args.framerate
             )
-
-    with timer("Turn into film"):
-        assemble_film(
-            frame_dir=plot_paths / "frames",
-            output_path=plot_paths / "pop3_144.mp4",
-            framerate=60
-        )

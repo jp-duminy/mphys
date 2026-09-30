@@ -161,39 +161,16 @@ def filter_duplicates(ledger: pl.DataFrame, min_sep_myr: float = 1e-3) -> pl.Dat
 
     return ledger.join(invasive_stars, on="particle_indices", how="anti")  # drop those stars from the ledger
 
-def select_star(ledger: pl.DataFrame, particle_indices: list[int]) -> pl.DataFrame:
+def select_stars(ledger: pl.DataFrame, labels: list[str]) -> pl.DataFrame:
     """
-    Grab the properties of specified stars from the ledger.
+    Selects stars based on their labels.
     """
-    return (ledger.filter(pl.col("particle_indices").is_in(particle_indices)))
+    typos = set(labels) - set(ledger["label"].unique())
 
-
-def build_film_tasks(ledger: pl.DataFrame, particle_indices: list[int], snapshot_dir: Path) -> pl.DataFrame:
-    """
-    Creates a dataframe containing the following info for making a film:
-
-    - particle_indices: particle IDs
-    - label: the label of each star for titles
-    - snapshot_path: the paths to each raw snapshot
-    - centre_unitary: the positions of the stars in the raw snapshot
-    - base_name: the {label}_{snapshot_stem} str.
-    """
-    tasks = (
-        ledger.pipe(select_star, particle_indices)
-        .sort("particle_indices", "snapshot")
-        .with_columns(
-            pl.col("positions_unitary").first().over("particle_indices").alias("centre_unitary"),  # position of star in its first snap
-            pl.format("{}/{}/{}", pl.lit(str(snapshot_dir)), pl.col("snapshot"), pl.col("snapshot"))  # concatenate directories
-                .alias("snapshot_path"),
-            pl.format("{}_{}", pl.col("label"), pl.col("snapshot")).alias("base_name"),  # concatenate star name + snap name
-        )
-        .select("particle_indices", "label", "snapshot_path", "centre_unitary", "base_name")
-    )
-
-    if not all(Path(path).exists() for path in tasks["snapshot_path"]):
-        print("Warning: not all snapshot paths exist (should not happen by construction).")
-
-    return tasks
+    if typos:  # guard here so you don't find out the following morning you made a typo 
+        raise ValueError(f"Typos: {sorted(typos)}")
+    
+    return ledger.filter(pl.col("label").is_in(labels))
 
 def create_snapshot_dataframe(
     snapshot: Path, 

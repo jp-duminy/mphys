@@ -1,6 +1,7 @@
 """
 
-Routine for generating films for a specified star.
+This routine generates projection plots for density, metallicity and temperature (weighted
+by density) for requested stars. It is an expensive one, taking ~6 hours for one star.
 
 """
 
@@ -11,12 +12,47 @@ from pathlib import Path
 
 import polars as pl
 import yt
-from yt.funcs import ensure_dir
 
-from find_pop3_stars import build_film_tasks, add_metallicity3
+from pop3_ledger import select_stars, star_lifetime_summary, add_metallicity3
 from utils import timer, DATA_DIR
 
 yt.enable_parallelism()
+
+def build_film_tasks(
+    ledger: pl.DataFrame, 
+    labels: list[str], 
+    post_sn_cutoff: float,
+    snapshot_dir: Path
+) -> pl.DataFrame:
+    """
+    Creates a dataframe containing the following info for making a film:
+
+    - particle_indices: particle IDs
+    - label: the label of each star for titles
+    - snapshot_path: the paths to each raw snapshot
+    - centre_unitary: the positions of the stars in the raw snapshot
+    - base_name: the {label}_{snapshot_stem} str.
+
+    The columns are filtered to between when the stars were born and post_sn_cutoff after death.
+    """
+    tasks = (
+        ledger.pipe(select_stars, labels)
+        .join(star_lifetime_summary(ledger), on=["particle_indices", "label"])  # adds birth/death info
+        .filter(pl.col("current_time_myr") <= pl.col("first_dead_myr").fill_null(float("inf")) + post_sn_cutoff)  # filter to where we want to visualise
+        .sort("particle_indices", "snapshot")  # time order
+        .with_columns(  # add global plotting info
+            pl.col("positions_unitary").first().over("particle_indices").alias("centre_unitary"),  # position of star in its first snap
+            pl.format("{}/{}/{}", pl.lit(str(snapshot_dir)), pl.col("snapshot"), pl.col("snapshot"))  # concatenate directories
+                .alias("snapshot_path"),
+            pl.format("{}_{}", pl.col("label"), pl.col("snapshot")).alias("base_name"),  # concatenate star name + snap name
+        )
+        .select("particle_indices", "label", "snapshot_path", "centre_unitary", "base_name")
+    )
+
+    if not all(Path(path).exists() for path in tasks["snapshot_path"]):  # quick guard
+        print("Warning: not all snapshot paths exist (should not happen by construction).")
+
+    return tasks
 
 def parse_args() -> argparse.Namespace:
     """
@@ -26,6 +62,13 @@ def parse_args() -> argparse.Namespace:
         prog="star-plot",
         description="Routine for making a plot of stars' lifetimes across the Pop2Prime simulation.",
         suggest_on_error=True,
+    )
+    parser.add_argument(
+        "-l",
+        "--ledger",
+        type=Path,
+        default=Path("pop3_ledger.parquet"),
+        help="Path to pop3 ledger."
     )
     parser.add_argument(
         "-o", 
@@ -38,7 +81,7 @@ def parse_args() -> argparse.Namespace:
         "-w",
         "--width",
         type=float,
-        default=1.0,
+        default=1.5,
         help="Width of each panel in kpc."
     )
     parser.add_argument(
@@ -52,24 +95,42 @@ def parse_args() -> argparse.Namespace:
         "-q",
         "--quickpeek",
         action="store_true",
+        help="Saves pngs for quick inspection."
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrites existing data files."
+    )
+    parser.add_argument(
+        "-s",
+        "--stars",
+        nargs="+",  # allows a list to be passed
+        help="Labels of stars for which you would like to produce plots."
+    )
+    parser.add_argument(
+        "-p",
+        "--postdeath",
+        type=float,
+        default=125,
+        help="Myr past death for which plots should be made."
     )
 
     return parser.parse_args()
 
 def generate_star_images(
     outdir: Path,
-    ledger_path: Path,
+    tasks: pl.DataFrame,
     width_kpc: float = 1.0,
     axis: str = "x",
     quickpeek: bool = False,
+    override: bool = False,
 ) -> None:
     """
     Generates projection plots of the star in each snapshot and saves them as .h5 files to the 
     requested output directory.
     """
-    ledger = pl.read_parquet(ledger_path)
-    tasks = build_film_tasks(ledger=ledger, particle_indices=[334267081], snapshot_dir=DATA_DIR)  # TODO: support multiple stars
-
     fields = [
         ("gas", "density"),
         ("gas", "temperature"),
@@ -77,13 +138,18 @@ def generate_star_images(
     ]
     weight_field = ("gas", "density")
 
+    for label in tasks["label"].unique():
+        (outdir / label).mkdir(parents=True, exist_ok=True)
+        (outdir / label / "projection_images").mkdir(parents=True, exist_ok=True)
+
     for row in yt.parallel_objects(list(tasks.iter_rows(named=True)), dynamic=False):
 
         yt.mylog.info(f"Processing {row['snapshot_path']}")
 
-        outpath = outdir / f"{row['base_name']}_{axis}.h5"
+        star_dir = outdir / row["label"]
+        outpath = star_dir / f"{row['base_name']}_{axis}.h5"
 
-        if outpath.exists():
+        if outpath.exists() and not override:
             yt.mylog.info(f"{outpath} already exists.")
             continue
 
@@ -104,7 +170,7 @@ def generate_star_images(
 
         if quickpeek:
             if yt.is_root():
-                p.save(f"{outdir / 'projection_images'}/")
+                p.save(f"{star_dir / 'projection_images'}/")
         del p
 
         if yt.is_root():
@@ -120,11 +186,22 @@ def generate_star_images(
 if __name__ == "__main__":
 
     args = parse_args()
-    ensure_dir(args.outdir)
+
+    ledger = pl.read_parquet(args.ledger)
+    labels = args.stars or star_lifetime_summary(ledger)["label"].to_list()
+
+    tasks: pl.DataFrame = build_film_tasks(
+        ledger=ledger, 
+        labels=labels,
+        post_sn_cutoff=args.postdeath,
+        snapshot_dir=DATA_DIR
+    )
+
     generate_star_images(
         outdir=args.outdir,
-        ledger_path=Path("pop3_catalogue.parquet"),
+        tasks=tasks,
         width_kpc=args.width,
         axis=args.axis,
         quickpeek=args.quickpeek,
+        override=args.force,
     )
