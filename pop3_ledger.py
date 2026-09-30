@@ -1,6 +1,7 @@
 """
 
-Functions for analysing the properties of Pop3 stars in reduced Pop2Prime simulation catalogues.
+This file contains the polars DataFrame functionality for storing and querying
+the pop3 stars' properties across the simulation. 
 
 """
 
@@ -12,20 +13,58 @@ if TYPE_CHECKING:
     from yt.data_objects.static_output import Dataset
 
 from pathlib import Path
+import argparse
 
 import yt
 from yt.data_objects.particle_filters import add_particle_filter
 import numpy as np
 import polars as pl
 from joblib import Parallel, delayed
+from rich.progress import track
 
 from utils import timer, DATA_DIR
+
+FIELD_MAP = {
+    "positions_unitary": ("particle_position", "unitary"),
+    "ptypes": ("particle_type", "dimensionless"),
+    "particle_indices": ("particle_index", "dimensionless"),
+    "masses_msun": ("particle_mass", "Msun"),
+    "metallicities": ("metallicity_fraction", "dimensionless"),
+    "creation_times_myr": ("creation_time", "Myr"),
+}
+
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parses the command-line arguments; returns the corresponding Namespace object.
+    """
+    parser = argparse.ArgumentParser(
+        prog="pop3-ledger",
+        description="Creates the POP3 ledger.",
+        suggest_on_error=True,
+    )
+    parser.add_argument(
+        "-o",
+        "--outdir",
+        type=Path,
+        default=Path("."),
+        help="Path to output directory."
+    )
+    parser.add_argument(
+        "-m",
+        "--metal",
+        type=float,
+        default=1e-10,
+        help="Maximum metallicity for a Pop3 star."
+    )
+
+    return parser.parse_args()
 
 
 def build_pop3_ledger(
     field_map: dict[str, tuple[str, str]],
     reduced_snap_dir: Path,
-    pop3_threshold: float = 1e-10,
+    pop3_metal_threshold: float = 1e-10,
     min_sep_myr: float = 1e-3,
     save_path: Path | None = None,
 ) -> pl.DataFrame:
@@ -35,12 +74,18 @@ def build_pop3_ledger(
     chunky raw snapshots (with timeseries). 
     """
     yt.set_log_level("warning")  # avoids lots of verbose output
+    snapshot_paths = sorted(reduced_snap_dir.glob(pattern="DD*.h5"))  # sort; joblib preserves output order when writing to list
 
-    frame_list = Parallel(n_jobs=-1)(delayed(create_snapshot_dataframe)(
-        snapshot=snapshot, pop3_threshold=pop3_threshold, field_map=field_map
-        ) for snapshot in sorted(reduced_snap_dir.glob(pattern="DD*.h5")))  # joblib preserves the order
+    results = Parallel(n_jobs=-1, return_as="generator")(delayed(create_snapshot_dataframe)(  # return as generator for rich
+        snapshot=snapshot, pop3_threshold=pop3_metal_threshold, field_map=field_map
+        ) for snapshot in snapshot_paths)
 
-    frame_list = [frame for frame in frame_list if frame is not None]  # filter None (from empty snaps)
+    frame_list = [
+        frame
+        for frame in track(results, total=len(snapshot_paths), description="Collecting Pop 3 stars")
+        if frame is not None  # filter None (from empty snaps)
+    ]  
+
     ledger: pl.DataFrame = pl.concat(frame_list)  # vertical concat
     ledger = ledger.pipe(filter_duplicates, min_sep_myr=min_sep_myr).with_columns(age_myr(), is_alive(), star_label())
 
@@ -86,6 +131,20 @@ def alive_snapshots(ledger: pl.DataFrame) -> pl.DataFrame:
         ledger.filter(is_alive())
         .group_by("particle_indices")
         .agg(pl.col("snapshot").sort_by("current_time_myr"))
+    )
+
+def star_lifetime_summary(ledger: pl.DataFrame) -> pl.DataFrame:
+    """
+    Returns lifetime stats for the stars.
+    """
+    return (
+        ledger.group_by("particle_indices", "label")
+        .agg(
+            pl.col("creation_times_myr").first(),
+            pl.col("current_time_myr").filter(pl.col("is_alive")).max().alias("last_alive_myr"),
+            pl.col("current_time_myr").filter(~pl.col("is_alive")).min().alias("first_dead_myr"),
+        )
+        .sort("creation_times_myr")
     )
 
 def filter_duplicates(ledger: pl.DataFrame, min_sep_myr: float = 1e-3) -> pl.DataFrame:
@@ -145,14 +204,13 @@ def create_snapshot_dataframe(
     Helper to create a dataframe from a reduced snapshot catalogue such that the loop over the catalogues
     can be parallelised.
     """
-    yt.set_log_level("warning")  # avoids lots of verbose output (new subprocesses spawned)
+    yt.set_log_level("error")  # avoids lots of verbose output (new subprocesses spawned)
 
     ds = yt.load(snapshot)
     metallicities = ds.data[("pop3", "metallicity_fraction")]
     pop3_mask = np.asarray(metallicities < pop3_threshold).nonzero()[0]
 
     if pop3_mask.shape[0] == 0:  # skip snaps with no pop3 stars
-        print(f"{snapshot.stem}: no Pop3 stars.")
         return None
 
     # create pure ndarrays from unyt arrays from the field map
@@ -172,8 +230,6 @@ def create_snapshot_dataframe(
         pl.lit(float(redshift)).alias("redshift"),  # need float() to remove unyt
         pl.lit(float(current_time)).alias("current_time_myr"),
     )
-
-    print(f"{snapshot.stem}: success.")
 
     return frame
 
@@ -196,14 +252,6 @@ def _pop3(pfilter: ParticleFilter, data: YTDataContainer):
 add_particle_filter("pop3", function=_pop3, filtered_type="all",
                     requires=["particle_type", "creation_time", "particle_mass"])
 
-field_map = {
-    "positions_unitary": ("particle_position", "unitary"),
-    "ptypes": ("particle_type", "dimensionless"),
-    "particle_indices": ("particle_index", "dimensionless"),
-    "masses_msun": ("particle_mass", "Msun"),
-    "metallicities": ("metallicity_fraction", "dimensionless"),
-    "creation_times_myr": ("creation_time", "Myr"),
-}
 
 def add_metallicity3(ds: Dataset) -> None:
     """
@@ -220,53 +268,18 @@ def add_metallicity3(ds: Dataset) -> None:
         units="Zsun",
         sampling_type="cell",
     )
-    
+
 
 if __name__ == "__main__":
 
-    parquet_path = Path("pop3_catalogue.parquet")
+    args = parse_args()
+    parquet_path = args.outdir / "pop3_ledger.parquet"
 
-    with timer("Build ledger"):
+    with timer("Ledger construction"):
         build_pop3_ledger(
-            field_map=field_map,
+            field_map=FIELD_MAP,
             reduced_snap_dir=DATA_DIR / "pop3",
             save_path=parquet_path,
+            pop3_metal_threshold=args.metal,
         )
-    yt.set_log_level("info")
-    
-    # probe Pop3 stars
-    test_snap = DATA_DIR / "DD0157" / "DD0157"
 
-    ledger = pl.read_parquet(parquet_path) 
-    print("success.")
-
-    """
-    snapshot_cols = ledger.filter(pl.col("snapshot") == "DD0157")
-    # grab the earliest-formed Pop3 star
-    star1_row = snapshot_cols.sort("creation_times_myr").row(0, named=True)  # return as dict
-
-    with timer("Load snapshot"):
-        ds = yt.load(test_snap)
-        ds.add_particle_filter("pop3")
-
-    star_centre = ds.arr(star1_row["positions_unitary"], "unitary")
-    radius = (1.0, "kpc")
-    print(f"{ds.domain_center.to("unitary")}")
-
-    with timer("Build sphere"):
-        sp = ds.sphere(star_centre, radius)
-
-    with timer("Projection plot"):
-        p = yt.ProjectionPlot(
-            ds,
-            "x",
-            ("gas", "temperature"),
-            center=sp.center,
-            data_source=sp,
-            width=(2.0, "kpc"),
-            weight_field=("gas", "density"),
-        )
-        p.annotate_particles((1.0, "kpc"), p_size=3.0, ptype="pop3")  # should pick up the star
-
-        p.save("cursory_plot.png")
-    """
