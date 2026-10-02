@@ -27,8 +27,8 @@ from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.text import Text
 
-from utils import timer
-from pop3_ledger import star_lifetime_summary, select_stars
+from ..utils import timer, common_parser
+from ..sim.pop3_ledger import star_lifetime_summary, select_stars
 
 MPL_STYLE = Path.home() / "mnras.mplstyle"
 
@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     Parses the command-line arguments; returns the corresponding Namespace object.
     """
     parser = argparse.ArgumentParser(
+        parents=[common_parser()],
         prog="star-film",
         description="Routine for converting star projection plots into film.",
         suggest_on_error=True,
@@ -55,20 +56,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Path to projection plots."
-    )
-    parser.add_argument(
-        "-l",
-        "--ledger",
-        type=Path,
-        default=Path("pop3_ledger.parquet"),
-        help="Path to pop3 ledger."
-    )
-    parser.add_argument(
-        "-o", 
-        "--outdir",
-        type=Path,
-        default=Path("."),
-        help="Path to output directory."
     )
     parser.add_argument(
         "-a",
@@ -83,12 +70,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=60,
         help="Framerate for the films."
-    )
-    parser.add_argument(
-        "-s",
-        "--stars",
-        nargs="+",  # allows a list to be passed
-        help="Labels of stars for which you would like to produce plots."
     )
 
     return parser.parse_args()

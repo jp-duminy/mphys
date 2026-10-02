@@ -13,8 +13,8 @@ from pathlib import Path
 import polars as pl
 import yt
 
-from pop3_ledger import select_stars, star_lifetime_summary, add_metallicity3
-from utils import timer, DATA_DIR
+from ..sim.pop3_ledger import select_stars, star_lifetime_summary, add_metallicity3
+from ..utils import timer, common_parser, DATA_DIR
 
 yt.enable_parallelism()
 
@@ -59,23 +59,10 @@ def parse_args() -> argparse.Namespace:
     Parses the command-line arguments; returns the corresponding Namespace object.
     """
     parser = argparse.ArgumentParser(
+        parents=[common_parser()],
         prog="star-plot",
         description="Routine for making a plot of stars' lifetimes across the Pop2Prime simulation.",
         suggest_on_error=True,
-    )
-    parser.add_argument(
-        "-l",
-        "--ledger",
-        type=Path,
-        default=Path("pop3_ledger.parquet"),
-        help="Path to pop3 ledger."
-    )
-    parser.add_argument(
-        "-o", 
-        "--outdir",
-        type=Path,
-        default=Path("."),
-        help="Path to output directory."
     )
     parser.add_argument(
         "-w",
@@ -102,12 +89,6 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Overwrites existing data files."
-    )
-    parser.add_argument(
-        "-s",
-        "--stars",
-        nargs="+",  # allows a list to be passed
-        help="Labels of stars for which you would like to produce plots."
     )
     parser.add_argument(
         "-p",

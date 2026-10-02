@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=82.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pop3"
+version = "0.1"
+description = "Modelling the observational signatures of Population III stars with Pop2Prime."
+requires-python = ">=3.14"
+authors = [
+    {name = "JP Duminy", email = "jp@duminy.org"},
+]
+readme = "README.md"
+
+dependencies = [
+    "numpy>=2.4",
+    "scipy>=1.18",
+    "polars>=1.44",
+    "joblib>=1.6.0",
+    "yt>=4.4",
+    "rich>=15.0",
+    "matplotlib>=3.11",
+    "h5py>=3.6",
+]
+
+keywords = ["astrophysics", "pop2prime", "simulation", 
+]

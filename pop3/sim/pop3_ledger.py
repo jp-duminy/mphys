@@ -22,7 +22,7 @@ import polars as pl
 from joblib import Parallel, delayed
 from rich.progress import track
 
-from utils import timer, DATA_DIR
+from ..utils import timer, common_parser, DATA_DIR
 
 FIELD_MAP = {
     "positions_unitary": ("particle_position", "unitary"),
@@ -39,16 +39,10 @@ def parse_args() -> argparse.Namespace:
     Parses the command-line arguments; returns the corresponding Namespace object.
     """
     parser = argparse.ArgumentParser(
+        parents=[common_parser()],
         prog="pop3-ledger",
         description="Creates the POP3 ledger.",
         suggest_on_error=True,
-    )
-    parser.add_argument(
-        "-o",
-        "--outdir",
-        type=Path,
-        default=Path("."),
-        help="Path to output directory."
     )
     parser.add_argument(
         "-m",
